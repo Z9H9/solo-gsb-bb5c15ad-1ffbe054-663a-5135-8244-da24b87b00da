@@ -37,9 +37,22 @@ class TimingRef:
 
 
 @dataclass(frozen=True)
+class BodyRange:
+    """一条字幕正文在物理行序列中的半开行区间 ``[start_line, end_line)``。
+
+    与 :class:`TimingRef` 一样，行号针对剥离开头 BOM 后、由
+    :func:`split_physical_lines` 切出的物理行序列。
+    """
+
+    start_line: int
+    end_line: int
+
+
+@dataclass(frozen=True)
 class ParsedDocument:
     cues: list[Cue]
     timing_refs: list[TimingRef]
+    body_ranges: list[BodyRange]
     bom_count: int
 
     @property
@@ -86,6 +99,7 @@ def _parse_document(content: str) -> ParsedDocument:
     total = len(lines)
     cues: list[Cue] = []
     timing_refs: list[TimingRef] = []
+    body_ranges: list[BodyRange] = []
     auto_index = 0
     block_no = 0
 
@@ -148,15 +162,33 @@ def _parse_document(content: str) -> ParsedDocument:
                 end_span=timing.span(2),
             )
         )
+        body_ranges.append(
+            BodyRange(start_line=timing_line_no + 1, end_line=timing_line_no + 1 + body_line_count)
+        )
 
     if not cues:
         raise SrtParseError("未解析到任何字幕，请粘贴有效的 SRT 内容。")
-    return ParsedDocument(cues=cues, timing_refs=timing_refs, bom_count=bom_count)
+    return ParsedDocument(
+        cues=cues, timing_refs=timing_refs, body_ranges=body_ranges, bom_count=bom_count
+    )
+
+
+def parse_document(content: str) -> ParsedDocument:
+    """逐物理行解析 SRT，返回字幕、时间轴行引用、正文行区间与 BOM 信息。"""
+    return _parse_document(content)
 
 
 def parse_srt(content: str) -> list[Cue]:
     """把 SRT 文本解析为 Cue 列表；块结构为“序号 / 时间轴 / 一行或多行文本”。"""
     return _parse_document(content).cues
+
+
+def split_line_eol(line: str) -> tuple[str, str]:
+    """把单个物理行拆成 ``(正文, 行尾)``；行尾为 ``\\r\\n`` / ``\\r`` / ``\\n`` 或空串。"""
+    match = _EOL_RE.search(line)
+    if match is None:
+        return line, ""
+    return line[: match.start()], line[match.start() :]
 
 
 def rewrite_srt(content: str, ranges: list[tuple[int, int]]) -> str:

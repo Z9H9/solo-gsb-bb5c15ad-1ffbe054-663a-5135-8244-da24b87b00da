@@ -20,17 +20,18 @@ from .placement import (
     parse_blocks,
     plan_positions,
 )
+from . import terms as terms_lib
 from .reading_load import find_reading_zones
-from .srt import SrtParseError, parse_srt, rewrite_srt
+from .srt import SrtParseError, parse_document, parse_srt, rewrite_srt
 from .timecode import format_signed_timecode, format_timecode
 
 STATIC_DIR = Path(__file__).parent / "static"
 
 app = FastAPI(
-    title="字幕校正、位置规划与阅读负荷工具",
-    description="粘贴 SRT 后可做时间漂移校正、按画面遮挡时段规划字幕上下位置，"
-    "或分析重叠字幕叠加后的阅读负荷热区。",
-    version="1.2.0",
+    title="字幕校正、位置规划、专名统一与阅读负荷工具",
+    description="粘贴 SRT 后可做时间漂移校正、按画面遮挡时段规划字幕上下位置、"
+    "统一专名别名，或分析重叠字幕叠加后的阅读负荷热区。",
+    version="1.3.0",
 )
 
 _FIELD_LABELS = {
@@ -186,6 +187,32 @@ class ReadingLoadResponse(BaseModel):
     zones: list[ReadingZoneView]
 
 
+class TermRuleIn(BaseModel):
+    standard: str = Field(..., description="标准写法（替换目标）")
+    aliases: list[str] = Field(..., description="该标准写法的别名列表，逐个替换")
+
+
+class TermsRequest(BaseModel):
+    srt: str = Field(..., description="原始 SRT 内容")
+    rules: list[TermRuleIn] = Field(
+        default_factory=list, description="专名规则，按输入顺序参与等长同分裁决"
+    )
+
+
+class TermHitView(BaseModel):
+    cue_order: int
+    line_no: int
+    column: int
+    source: str
+    standard: str
+
+
+class TermsResponse(BaseModel):
+    revised_srt: str
+    hits: list[TermHitView]
+    hit_count: int
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -204,6 +231,11 @@ def placement_page() -> FileResponse:
 @app.get("/reading-load")
 def reading_load_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "reading_load.html")
+
+
+@app.get("/terms")
+def terms_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "terms.html")
 
 
 @app.post("/api/correct", response_model=CorrectResponse)
@@ -375,4 +407,41 @@ def reading_load(req: ReadingLoadRequest) -> ReadingLoadResponse | JSONResponse:
         zone_count=len(zones),
         cues=cue_views,
         zones=zone_views,
+    )
+
+
+@app.post("/api/terms", response_model=TermsResponse)
+def unify_terms(req: TermsRequest) -> TermsResponse | JSONResponse:
+    # 1. 先校验专名规则：空别名、同一别名指向不同标准写法均返回 422
+    try:
+        rules = terms_lib.build_rules([(r.standard, r.aliases) for r in req.rules])
+    except terms_lib.TermError as exc:
+        raise HTTPException(status_code=422, detail={"type": "terms", "message": str(exc)})
+
+    # 2. 复用现有 SRT 解析，并取每条字幕正文在物理行序列中的区间
+    try:
+        doc = parse_document(req.srt)
+    except SrtParseError as exc:
+        raise HTTPException(status_code=422, detail={"type": "srt", "message": str(exc)})
+
+    # 3. 仅扫描正文各物理行：从左到右一次匹配原文，同位置最长别名优先，
+    #    等长按规则输入顺序；命中的替换文本不再参与匹配。只改写正文命中片段，
+    #    序号、时间轴、排版参数、空行、BOM 与换行风格保持原样
+    revised, hits = terms_lib.apply_terms(
+        req.srt, rules, [(r.start_line, r.end_line) for r in doc.body_ranges]
+    )
+
+    return TermsResponse(
+        revised_srt=revised,
+        hits=[
+            TermHitView(
+                cue_order=hit.cue_order,
+                line_no=hit.line_no,
+                column=hit.column,
+                source=hit.source,
+                standard=hit.standard,
+            )
+            for hit in hits
+        ],
+        hit_count=len(hits),
     )

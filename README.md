@@ -1,6 +1,6 @@
-# 字幕校正、位置规划与阅读负荷工具
+# 字幕校正、位置规划、专名统一与阅读负荷工具
 
-基于 **Python + FastAPI** 的轻量 Web 工具，包含三个功能页面：
+基于 **Python + FastAPI** 的轻量 Web 工具，包含四个功能页面：
 
 1. **字幕时间漂移校正**：粘贴 SRT 字幕，填入多组人工确认的「原时间 / 正确时间」
    锚点，按分段线性映射校正字幕时间，在网页预览并下载校正后的 SRT。
@@ -10,6 +10,9 @@
 3. **阅读负荷热区**（<http://localhost:8000/reading-load>）：粘贴 SRT，输入阅读
    速率阈值（字/秒）与热区最短持续时长（毫秒），按起止事件精确扫描时间轴，找出
    重叠字幕合计速率严格超标的热区，页面高亮并下载同一份结果 JSON。
+4. **字幕专名统一**（<http://localhost:8000/terms>）：粘贴 SRT，按行输入专名的
+   标准写法与别名，只扫描字幕正文各物理行，按最长别名优先、等长按输入顺序的规则
+   从左到右一次替换，页面显示逐处替换清单并下载仅改正文命中片段的修订 SRT。
 
 ## 功能与校正规则（时间漂移）
 
@@ -71,6 +74,35 @@
   不是非负整数、SRT 无法解析时，接口均返回 `422`（`detail.field` 指出字段，
   `detail.message` 给出中文原因；SRT 解析错误的 `detail.type` 为 `srt`）。
 
+## 功能与统一规则（字幕专名统一）
+
+- 输入 SRT（复用同一套字幕解析器）与若干条专名规则；每条规则包含一个
+  **标准写法** `standard`（替换目标）与若干**别名** `aliases`（每行一个）。
+- 规则**逐条输入**，按输入顺序参与等长同分裁决：同一位置多个别名等长时，
+  取排在前面的规则；**空别名**（空串或仅含空白）与**同一别名指向不同标准
+  写法**均拒绝生成，接口返回 `422` 并在 `detail.message` 中指出第几条规则
+  或冲突别名（`detail.type` 为 `terms`）。同一别名在多条规则中指向同一个
+  标准写法是允许的。
+- **只扫描字幕正文的各物理行**：序号行与时间轴行（含 `X1:` / `Position:`
+  等排版参数）不参与匹配；扫描**区分大小写**（`iPhone`、`IPHONE` 是不同
+  别名）。
+- 每一行**从左到右只对原文匹配一次**：同一位置优先匹配字符数**最长**的
+  别名；长度相同按**规则输入顺序**取靠前者；命中后整段别名连同替换进去的
+  标准写法一起跳过——**命中的替换文本不再参与匹配**（标准写法自身包含
+  别名时也不会二次替换，更不会死循环）。
+- 逐处返回命中的**字幕输入序号** `cue_order`（按粘贴 SRT 中字幕出现位置
+  从 1 开始编号，与字幕自身的 SRT 序号无关）、该字幕正文内的**物理行号**
+  `line_no`（从 1 开始）、**行内位置** `column`（该物理行中从 0 开始的
+  字符位置）、命中的**原文** `source` 与**标准写法** `standard`。
+- **无损导出**：直接在原始 SRT 物理行上替换命中片段，字幕序号、时间轴、
+  `X1:`/`X2:`/`Y1:`/`Y2:`/`Position:` 等排版参数、块间空行、原有换行
+  （CRLF/LF/CR 原样保留，不统一改写）以及文件开头的 UTF-8 BOM 均保持
+  不变；**没有任何命中时修订 SRT 与输入逐字符一致**（原样返回）。
+- 页面以替换清单表格（输入序号 / 正文行 / 行内位置 / 原文 → 标准写法）
+  展示结果，并可一键下载 `revised.srt`：下载内容就是接口返回的同一份
+  `revised_srt`（UTF-8，原 BOM / 换行风格保留）。规则非法或 SRT 无法
+  解析时，接口返回 `422`。
+
 ## 一条命令启动（Docker Compose）
 
 ```bash
@@ -82,7 +114,11 @@ docker compose up -d --build
 - 时间漂移校正界面：<http://localhost:8000/>
 - 字幕位置规划界面：<http://localhost:8000/placement>
 - 阅读负荷热区界面：<http://localhost:8000/reading-load>
-- 阅读负荷热区接口：`POST` <http://localhost:8000/api/reading-load>
+- 字幕专名统一界面：<http://localhost:8000/terms>
+- 时间漂移接口：`POST` <http://localhost:8000/api/correct>
+- 位置规划接口：`POST` <http://localhost:8000/api/placement>
+- 阅读负荷接口：`POST` <http://localhost:8000/api/reading-load>
+- 专名统一接口：`POST` <http://localhost:8000/api/terms>
 - 健康检查：<http://localhost:8000/health>
 - 接口文档（FastAPI 自带）：<http://localhost:8000/docs>
 
@@ -101,8 +137,8 @@ docker compose up -d --build
 
 ```bash
 HOST_PORT=9000 docker compose up -d --build
-# 访问 http://localhost:9000/ 、http://localhost:9000/placement
-# 与 http://localhost:9000/reading-load
+# 访问 http://localhost:9000/ 、http://localhost:9000/placement 、
+# http://localhost:9000/reading-load 与 http://localhost:9000/terms
 ```
 
 ## 不用 Docker，直接运行（Python 3.10+）
@@ -112,8 +148,8 @@ pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-同样访问 <http://localhost:8000/>、<http://localhost:8000/placement>
-与 <http://localhost:8000/reading-load>。
+同样访问 <http://localhost:8000/>、<http://localhost:8000/placement>、
+<http://localhost:8000/reading-load> 与 <http://localhost:8000/terms>。
 
 ## HTTP 接口
 
@@ -186,21 +222,50 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 合计速率**严格超过**阈值的相接分段先合并，再按 `duration_ms >= min_duration_ms`
 过滤；没有热区时 `zones` 为空数组。参数不合法或 SRT 解析失败返回 `422`。
 
+### `POST /api/terms`
+
+```json
+{
+  "srt": "1\r\n00:00:01,000 --> 00:00:03,000\r\n他新买的 IPHONE 到货了\r\n",
+  "rules": [
+    {"standard": "iPhone", "aliases": ["IPHONE", "iphone"]},
+    {"standard": "北京大学", "aliases": ["Peking University", "北大"]}
+  ]
+}
+```
+
+`rules` 可省略或传空数组（不做任何替换，原文原样返回）。成功返回：
+
+- `revised_srt`：与输入同构的完整 SRT 文本，只替换正文命中片段，序号、时间轴、
+  行尾排版参数、空行、CRLF/LF/CR 换行及开头 BOM 原样保留；**没有命中时与输入
+  逐字符一致**；
+- `hits`：每处命中的 `cue_order`（字幕输入序号，从 1 开始）、`line_no`（该
+  字幕正文内从 1 开始的物理行号）、`column`（行内从 0 开始的字符位置）、
+  `source`（命中的原文别名）与 `standard`（标准写法）；
+- `hit_count`：命中总数（未命中为 `0`，`hits` 为空数组）。
+
+匹配区分大小写，仅扫描正文物理行；每个位置最长别名优先、等长按规则输入顺序，
+命中片段与其替换文本整体跳过、不回扫。包含空别名（空串或纯空白）或同一别名
+指向不同标准写法时返回 `422`（`detail.type` 为 `terms`）；SRT 无法解析时
+`detail.type` 为 `srt`。
+
 ## 目录结构
 
 ```
 .
 ├── app/
-│   ├── main.py           # FastAPI 应用、/api/correct、/api/placement 与 /api/reading-load 接口
+│   ├── main.py           # FastAPI 应用、/api/correct、/api/placement、/api/reading-load 与 /api/terms 接口
 │   ├── mapping.py        # 锚点校验与分段线性映射
 │   ├── placement.py      # 遮挡时段并集、遮挡时长统计、位置规划 DP、WebVTT 导出
 │   ├── reading_load.py   # 字 / 秒速率、半开时间轴事件扫描、热区合并与最短时长过滤
-│   ├── srt.py            # SRT 解析与无损重写（仅替换时间码，保留原格式）
+│   ├── terms.py          # 专名规则校验、最长优先一次扫描与正文无损替换
+│   ├── srt.py            # SRT 解析、正文行定位与无损重写（保留原格式）
 │   ├── timecode.py       # 时间码解析与格式化（SRT / WebVTT）
 │   └── static/
 │       ├── index.html         # 时间漂移校正页面（原生 HTML/CSS/JS）
 │       ├── placement.html     # 字幕位置规划页面（原生 HTML/CSS/JS）
-│       └── reading_load.html  # 阅读负荷热区页面（原生 HTML/CSS/JS）
+│       ├── reading_load.html  # 阅读负荷热区页面（原生 HTML/CSS/JS）
+│       └── terms.html         # 字幕专名统一页面（原生 HTML/CSS/JS）
 ├── tests/               # 核心算法与接口测试
 ├── Dockerfile
 ├── docker-compose.yml

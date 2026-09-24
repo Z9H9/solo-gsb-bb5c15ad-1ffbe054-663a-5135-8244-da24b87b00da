@@ -17,7 +17,8 @@ from app.placement import (
     plan_positions,
 )
 from app.reading_load import count_display_chars, find_reading_zones
-from app.srt import BOM, SrtParseError, format_srt, parse_srt, rewrite_srt
+from app.srt import BOM, SrtParseError, format_srt, parse_document, parse_srt, rewrite_srt
+from app.terms import TermError, TermRule, apply_terms, build_rules, scan_line
 from app.timecode import format_timecode, parse_timecode
 
 client = TestClient(app)
@@ -749,3 +750,290 @@ def test_api_reading_load_nan_token_is_422_not_500():
     )
     assert resp.status_code == 422
     assert resp.json()["detail"]["field"] == "rate_threshold"
+
+
+# ---------- 字幕专名统一 ----------
+
+TERMS_SRT = (
+    "1\r\n"
+    "00:00:01,000 --> 00:00:03,000\r\n"
+    "他新买的 IPHONE 到货了\r\n"
+    "\r\n"
+    "2\n"
+    "00:00:04,000 --> 00:00:06,000 X1:10\n"
+    "用 iphone 拍视频\n"
+    "第二行 iphone15\n"
+)
+
+
+def test_build_rules_rejects_empty_alias_and_standard():
+
+    with pytest.raises(TermError, match="第 2 条规则"):
+        build_rules([("北京大学", ["北大"]), ("清华", [""])])
+    with pytest.raises(TermError, match="空别名"):
+        build_rules([("北京大学", ["  "])])
+    with pytest.raises(TermError, match="标准写法不能为空"):
+        build_rules([("  ", ["北大"])])
+
+
+def test_build_rules_rejects_same_alias_different_standard():
+
+    with pytest.raises(TermError, match="同一别名只能对应一个标准写法"):
+        build_rules([("北京大学", ["PKU"]), ("北大青鸟", ["PKU"])])
+    # 同一别名指向同一标准写法允许（跨规则重复，各自按输入顺序保留）
+    rules = build_rules([("北京大学", ["PKU"]), ("北京大学", ["PKU", "北大"])])
+    assert rules[0].aliases == ("PKU",)
+    assert rules[1].aliases == ("PKU", "北大")
+
+
+def test_scan_line_longest_wins_and_case_sensitive():
+
+    rules = build_rules([("北京大学", ["Peking University", "Peking Univ", "北大"])])
+    out, hits = scan_line("Peking University 与北大", rules)
+    assert out == "北京大学 与北京大学"
+    # “Peking University”17 字符 + 空格 + “与”，“北大”起点为原文位置 19
+    assert [h[0] for h in hits] == [0, 19]
+    assert [h[1] for h in hits] == ["Peking University", "北大"]
+
+    # 最长别名优先：同一位置长别名压过其前缀
+    out2, hits2 = scan_line("Peking Univ 在此", rules)
+    assert out2 == "北京大学 在此"
+    assert hits2 == [(0, "Peking Univ", "北京大学")]
+
+    # 区分大小写：小写 peking 不命中
+    out3, hits3 = scan_line("peking university", rules)
+    assert out3 == "peking university"
+    assert hits3 == []
+
+
+def test_scan_line_equal_length_uses_rule_order():
+
+    # 合法输入下等长别名在同一位置只能是同一字符串（冲突校验已拒绝一对多），
+    # 同别名经 build_rules 去重后保留在最早输入的规则中——等长同分自然由
+    # scan_line 遍历到的首条规则承担。这里用直接构造的规则覆盖：
+    # 1) 别名只在首条规则命中时取首条规则；
+    first = TermRule(standard="先", aliases=("AA",), order=1)
+    other = TermRule(standard="后", aliases=("AB",), order=2)
+    out, hits = scan_line("AA 在此", [first, other])
+    assert out == "先 在此"
+    assert hits == [(0, "AA", "先")]
+
+    # 2) 等长别名即使出现在后输入的规则，长度不占优也不会抢匹配；
+    #    更长别名来自后输入规则时，最长优先仍压过顺序
+    longer = TermRule(standard="长", aliases=("AAA",), order=2)
+    out2, hits2 = scan_line("AAA", [first, longer])
+    assert out2 == "长"
+    assert hits2 == [(0, "AAA", "长")]
+
+
+def test_scan_line_replacement_text_not_rematched():
+
+    # 标准写法自身包含别名：只在原文位置匹配一次。若替换文本被重新扫描，
+    # “甲”→“甲甲”会无限增长；正确行为是单次命中后整段跳过
+    rules = build_rules([("甲甲", ["甲"])])
+    assert scan_line("甲", rules) == ("甲甲", [(0, "甲", "甲甲")])
+
+    # 多字原文：每个原文“甲”各命中一次，替换出来的“甲甲”不回扫
+    out, hits = scan_line("甲甲", rules)
+    assert out == "甲甲甲甲"
+    assert hits == [(0, "甲", "甲甲"), (1, "甲", "甲甲")]
+
+    # 连续不同别名各命中一次，位置基于原文逐个推进
+    rules2 = build_rules([("X", ["甲", "乙"])])
+    out2, hits2 = scan_line("甲乙甲", rules2)
+    assert out2 == "XXX"
+    assert [(h[0], h[1]) for h in hits2] == [(0, "甲"), (1, "乙"), (2, "甲")]
+
+
+def test_apply_terms_only_touches_body_and_preserves_format():
+
+    doc = parse_document(TERMS_SRT)
+    rules = build_rules([("iPhone", ["IPHONE", "iphone"])])
+    out, hits = apply_terms(
+        TERMS_SRT, rules, [(r.start_line, r.end_line) for r in doc.body_ranges]
+    )
+
+    # 序号、时间轴（含 X1 排版参数）、CRLF/LF 混排、空行原样
+    assert out.startswith("1\r\n00:00:01,000 --> 00:00:03,000\r\n")
+    assert "\r\n\r\n2\n00:00:04,000 --> 00:00:06,000 X1:10\n" in out
+    assert "他新买的 iPhone 到货了\r\n" in out
+    assert "用 iPhone 拍视频\n第二行 iPhone15\n" in out
+    # 时间轴与序号不被误改
+    assert "00:00:04,000" in out
+    # 命中清单：字幕输入序号、正文行号（块内从 1）、0 基列位置、原文、标准
+    assert [(h.cue_order, h.line_no, h.column, h.source) for h in hits] == [
+        (1, 1, 5, "IPHONE"),
+        (2, 1, 2, "iphone"),
+        (2, 2, 4, "iphone"),
+    ]
+
+
+def test_apply_terms_preserves_bom_and_cr():
+
+    src = BOM + "1\r00:00:01,000 --> 00:00:02,000\r北大很好\r"
+    doc = parse_document(src)
+    rules = build_rules([("北京大学", ["北大"])])
+    out, hits = apply_terms(
+        src, rules, [(r.start_line, r.end_line) for r in doc.body_ranges]
+    )
+    assert out == BOM + "1\r00:00:01,000 --> 00:00:02,000\r北京大学很好\r"
+    assert len(hits) == 1 and hits[0].cue_order == 1 and hits[0].column == 0
+
+
+def test_apply_terms_no_hit_is_identical_input():
+
+    # 无命中：原文原样返回（多个 BOM 也逐字符保留，不走重写补 BOM 路径）
+    src = BOM + BOM + "1\n00:00:01,000 --> 00:00:02,000\n无别名\n"
+    doc = parse_document(src)
+    rules = build_rules([("X", ["不存在的别名"])])
+    out, hits = apply_terms(
+        src, rules, [(r.start_line, r.end_line) for r in doc.body_ranges]
+    )
+    assert out == src
+    assert hits == []
+
+    # 空规则列表同样原样返回
+    out2, hits2 = apply_terms(
+        src, [], [(r.start_line, r.end_line) for r in doc.body_ranges]
+    )
+    assert out2 == src and hits2 == []
+
+
+def test_apply_terms_skips_index_and_timing_lines():
+
+    src = "1\n00:00:01,000 --> 00:00:02,000\n正文不含别名\n"
+    doc = parse_document(src)
+    # 别名恰好等于序号字符与时间轴子串，也只能在正文匹配 -> 无命中
+    rules = build_rules([("X", ["1", "00:00:01,000"])])
+    out, hits = apply_terms(
+        src, rules, [(r.start_line, r.end_line) for r in doc.body_ranges]
+    )
+    assert out == src and hits == []
+
+
+def terms_body(**overrides):
+    body = {
+        "srt": TERMS_SRT,
+        "rules": [
+            {"standard": "iPhone", "aliases": ["IPHONE", "iphone"]},
+            {"standard": "北京大学", "aliases": ["Peking University"]},
+        ],
+    }
+    body.update(overrides)
+    return body
+
+
+def test_terms_page_served():
+    resp = client.get("/terms")
+    assert resp.status_code == 200
+    assert "字幕专名统一" in resp.text
+    assert "/api/terms" in resp.text
+
+
+def test_api_terms_success_and_hits():
+    resp = client.post("/api/terms", json=terms_body())
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["hit_count"] == 3
+    assert data["hits"][0] == {
+        "cue_order": 1,
+        "line_no": 1,
+        "column": 5,
+        "source": "IPHONE",
+        "standard": "iPhone",
+    }
+    assert "他新买的 iPhone 到货了\r\n" in data["revised_srt"]
+    # 原文的 CRLF/LF 混排与时间轴排版参数保留
+    assert "00:00:04,000 --> 00:00:06,000 X1:10\n" in data["revised_srt"]
+    assert data["revised_srt"].count("\r\n") == TERMS_SRT.count("\r\n")
+
+
+def test_api_terms_no_hit_returns_original():
+    body = terms_body(rules=[{"standard": "X", "aliases": ["不存在"]}])
+    resp = client.post("/api/terms", json=body)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["hit_count"] == 0
+    assert data["hits"] == []
+    assert data["revised_srt"] == TERMS_SRT
+
+
+def test_api_terms_empty_rules_is_identity():
+    resp = client.post("/api/terms", json={"srt": TERMS_SRT, "rules": []})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["revised_srt"] == TERMS_SRT
+
+
+def test_api_terms_rejects_empty_alias():
+    body = terms_body()
+    body["rules"][0]["aliases"].append("  ")
+    resp = client.post("/api/terms", json=body)
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["type"] == "terms"
+    assert "空别名" in detail["message"]
+
+
+def test_api_terms_rejects_conflicting_alias():
+    body = terms_body()
+    body["rules"].append({"standard": "别的公司", "aliases": ["iphone"]})
+    resp = client.post("/api/terms", json=body)
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["type"] == "terms"
+    assert "iphone" in detail["message"]
+
+
+def test_api_terms_rejects_bad_srt():
+    resp = client.post("/api/terms", json=terms_body(srt="garbage"))
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["type"] == "srt"
+
+
+def test_api_terms_bom_and_blank_lines_lossless():
+    src = (
+        BOM
+        + "1\r\n00:00:01,000 --> 00:00:02,000\r\n北大\r\n\r\n\r\n"
+        + "2\n00:00:03,000 --> 00:00:04,000\n也是北大\n"
+    )
+    body = {"srt": src, "rules": [{"standard": "北京大学", "aliases": ["北大"]}]}
+    resp = client.post("/api/terms", json=body)
+    assert resp.status_code == 200, resp.text
+    out = resp.json()["revised_srt"]
+    assert out.startswith(BOM + "1\r\n")
+    assert "北京大学\r\n\r\n\r\n" in out
+    assert out.endswith("2\n00:00:03,000 --> 00:00:04,000\n也是北京大学\n")
+    assert resp.json()["hit_count"] == 2
+
+
+def test_api_terms_multiple_boms_collapse_to_one_on_change():
+    # 有命中需要重写时，多个开头 BOM 最多保留一个（与 /api/correct 一致）；
+    # 无命中时则逐字符原样返回（见 test_apply_terms_no_hit_is_identical_input）
+    src = BOM + BOM + "1\n00:00:01,000 --> 00:00:02,000\n北大\n"
+    body = {"srt": src, "rules": [{"standard": "北京大学", "aliases": ["北大"]}]}
+    resp = client.post("/api/terms", json=body)
+    assert resp.status_code == 200, resp.text
+    out = resp.json()["revised_srt"]
+    assert out == BOM + "1\n00:00:01,000 --> 00:00:02,000\n北京大学\n"
+    assert not out.startswith(BOM + BOM)
+
+
+def test_api_terms_longer_alias_in_later_rule_wins():
+    # 短别名来自先输入的规则、更长别名来自后输入规则：仍按最长选择
+    src = "1\n00:00:01,000 --> 00:00:02,000\nABCD 与 AB\n"
+    body = {
+        "srt": src,
+        "rules": [
+            {"standard": "短", "aliases": ["AB"]},
+            {"standard": "长", "aliases": ["ABCD"]},
+        ],
+    }
+    resp = client.post("/api/terms", json=body)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert "长 与 短" in data["revised_srt"]
+    assert [(h["column"], h["source"], h["standard"]) for h in data["hits"]] == [
+        (0, "ABCD", "长"),
+        (7, "AB", "短"),
+    ]
+
