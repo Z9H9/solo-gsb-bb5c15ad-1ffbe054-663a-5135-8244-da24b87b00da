@@ -18,6 +18,7 @@ from app.placement import (
 )
 from app.reading_load import count_display_chars, find_reading_zones
 from app.srt import BOM, SrtParseError, format_srt, parse_srt, rewrite_srt
+from app.terms import TermError, TermRule, compile_rules, scan_line, unify_srt
 from app.timecode import format_timecode, parse_timecode
 
 client = TestClient(app)
@@ -749,3 +750,272 @@ def test_api_reading_load_nan_token_is_422_not_500():
     )
     assert resp.status_code == 422
     assert resp.json()["detail"]["field"] == "rate_threshold"
+
+
+# ---------- 字幕专名统一 ----------
+
+def _aliases(*pairs):
+    """pairs: (standard, aliases...) -> 编译后的别名列表"""
+    return compile_rules([TermRule(std, tuple(als)) for std, als in pairs])
+
+
+def test_compile_rules_rejects_empty():
+    with pytest.raises(TermError, match="至少需要 1 条"):
+        compile_rules([])
+    with pytest.raises(TermError, match="标准写法不能为空"):
+        compile_rules([TermRule("", ("NASA",))])
+    with pytest.raises(TermError, match="至少需要一个别名"):
+        compile_rules([TermRule("美国宇航局", ())])
+    with pytest.raises(TermError, match="空别名"):
+        compile_rules([TermRule("美国宇航局", ("NASA", ""))])
+
+
+def test_compile_rules_rejects_conflicting_alias():
+    with pytest.raises(TermError, match="同一别名|同时指向不同的标准写法"):
+        compile_rules([
+            TermRule("甲", ("NASA",)),
+            TermRule("乙", ("nasa", "NASA")),
+        ])
+    # 错误信息应指出两个标准写法与规则序号
+    try:
+        compile_rules([TermRule("甲", ("NASA",)), TermRule("乙", ("NASA",))])
+    except TermError as exc:
+        assert "甲" in str(exc) and "乙" in str(exc)
+        assert "第 1 条规则" in str(exc) and "第 2 条规则" in str(exc)
+
+
+def test_compile_rules_dedups_same_alias_same_standard():
+    # 同一别名重复指向同一标准写法：接受，以先输入的规则为准
+    compiled = compile_rules([
+        TermRule("甲", ("AB",)),
+        TermRule("甲", ("CD", "AB")),
+    ])
+    assert [a.text for a in compiled] == ["AB", "CD"]
+    assert all(a.standard == "甲" for a in compiled)
+
+
+def test_scan_line_case_sensitive():
+    aliases = _aliases(("标准", ("NASA",)))
+    hits = scan_line("nasa Nasa NASA", aliases)
+    assert [(h[0], h[1], h[2]) for h in hits] == [(10, 14, "NASA")]
+
+
+def test_scan_line_longest_alias_wins():
+    # 同一位置“人工”与“人工智能”都能匹配时，最长别名优先
+    aliases = _aliases(("AI", ("人工", "人工智能")))
+    hits = scan_line("人工智能与人工", aliases)
+    assert [(h[0], h[1], h[2]) for h in hits] == [(0, 4, "人工智能"), (5, 7, "人工")]
+
+
+def test_scan_line_single_pass_left_to_right():
+    # 从左到右一次匹配：命中片段被跳过，不再切分出新的命中
+    aliases = _aliases(("标准", ("aa",)))
+    hits = scan_line("aaa", aliases)
+    assert [(h[0], h[1]) for h in hits] == [(0, 2)]
+
+
+def test_scan_line_replacement_not_rescanned():
+    # 标准写法自身包含别名时，替换文本不再参与匹配（不会连锁/死循环）
+    aliases = _aliases(("NASAX", ("NASA",)))
+    hits = scan_line("NASA", aliases)
+    assert [(h[0], h[1], h[2], h[3]) for h in hits] == [(0, 4, "NASA", "NASAX")]
+
+
+TERMS_SRT = (
+    "1\n00:00:01,000 --> 00:00:04,000\nNASA announced it\nand nasa too\n\n"
+    "2\n00:00:05,000 --> 00:00:08,000\nCNSA 发布通告\n"
+)
+
+TERMS_RULES = [
+    TermRule("NASA（美国国家航空航天局）", ("NASA", "nasa")),
+    TermRule("中国国家航天局", ("CNSA",)),
+]
+
+
+def test_unify_srt_scans_each_body_physical_line():
+    unified, hits, _ = unify_srt(TERMS_SRT, TERMS_RULES)
+    assert len(hits) == 3
+    # 命中按字幕输入顺序、物理行顺序、行内从左到右排列
+    assert [(h.cue_order, h.line_no, h.offset, h.matched) for h in hits] == [
+        (1, 2, 0, "NASA"),
+        (1, 3, 4, "nasa"),
+        (2, 7, 0, "CNSA"),
+    ]
+    assert hits[0].cue_index == "1" and hits[0].standard == "NASA（美国国家航空航天局）"
+    assert "NASA（美国国家航空航天局） announced it" in unified
+    assert "and NASA（美国国家航空航天局） too" in unified
+    assert "中国国家航天局 发布通告" in unified
+    # 序号与时间轴行原样
+    assert "1\n00:00:01,000 --> 00:00:04,000\n" in unified
+    assert "2\n00:00:05,000 --> 00:00:08,000\n" in unified
+
+
+def test_unify_srt_ignores_index_and_timing_lines():
+    # 别名出现在时间轴行的定位参数里也不算命中：只扫描字幕正文物理行
+    src = (
+        "1\n"
+        "00:00:01,000 --> 00:00:04,000 Position:NASA,50%,0\n"
+        "NASA 发布消息\n"
+    )
+    unified, hits, _ = unify_srt(src, [TermRule("美国宇航局", ("NASA",))])
+    assert len(hits) == 1
+    assert hits[0].line_no == 2
+    assert "Position:NASA,50%,0" in unified  # 时间轴行原样保留
+    assert "美国宇航局 发布消息" in unified
+
+
+def test_unify_srt_no_hit_returns_identical_content():
+    unified, hits, _ = unify_srt(TERMS_SRT, [TermRule("标准", ("ZZZ",))])
+    assert hits == []
+    assert unified == TERMS_SRT
+
+
+def test_unify_srt_lossless_bom_crlf_params_and_blank_lines():
+    src = (
+        BOM
+        + "1\r\n"
+        + "00:00:01,000 --> 00:00:04,000  X1:10 X2:630\r\n"
+        + "NASA 上行\r\n"
+        + "下行 nasa\r\n"
+        + "\r\n"
+        + "\r\n"  # 多余空行也保留
+        + "2\r\n"
+        + "00:00:05,000 --> 00:00:06,500\r\n"
+        + "无命中行\r\n"
+    )
+    unified, hits, _ = unify_srt(src, TERMS_RULES)
+    assert len(hits) == 2
+    assert unified.startswith(BOM)
+    assert BOM not in unified[1:]
+    # 只改正文命中片段：CRLF、定位参数、空行、未命中行全部原样
+    assert "00:00:01,000 --> 00:00:04,000  X1:10 X2:630\r\n" in unified
+    assert "NASA（美国国家航空航天局） 上行\r\n" in unified
+    assert "下行 NASA（美国国家航空航天局）\r\n" in unified
+    assert "\r\n\r\n\r\n2\r\n" in unified
+    assert "无命中行\r\n" in unified
+    assert unified.endswith("无命中行\r\n")
+
+
+def test_terms_page_served():
+    resp = client.get("/terms")
+    assert resp.status_code == 200
+    assert "字幕专名统一" in resp.text
+    assert "/api/terms" in resp.text
+
+
+def terms_body(**overrides):
+    body = {
+        "srt": TERMS_SRT,
+        "rules": [
+            {"standard": "NASA（美国国家航空航天局）", "aliases": ["NASA", "nasa"]},
+            {"standard": "中国国家航天局", "aliases": ["CNSA"]},
+        ],
+    }
+    body.update(overrides)
+    return body
+
+
+def test_api_terms_success():
+    resp = client.post("/api/terms", json=terms_body())
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["hit_count"] == 3
+    first = data["hits"][0]
+    # 每处命中：字幕输入序号、原文、标准写法与行内位置
+    assert first["cue_order"] == 1
+    assert first["cue_index"] == "1"
+    assert first["line"] == 3  # 1 起始的物理行号
+    assert first["offset"] == 0
+    assert first["matched"] == "NASA"
+    assert first["standard"] == "NASA（美国国家航空航天局）"
+    assert first["line_text"] == "NASA announced it"
+    assert data["hits"][1]["matched"] == "nasa"
+    assert data["hits"][1]["offset"] == 4
+    assert data["hits"][2]["cue_order"] == 2
+    assert data["hits"][2]["standard"] == "中国国家航天局"
+    assert "NASA（美国国家航空航天局） announced it" in data["unified_srt"]
+    assert "中国国家航天局 发布通告" in data["unified_srt"]
+
+
+def test_api_terms_no_hit_returns_original():
+    resp = client.post(
+        "/api/terms",
+        json=terms_body(rules=[{"standard": "标准", "aliases": ["ZZZ"]}]),
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["hit_count"] == 0
+    assert data["hits"] == []
+    assert data["unified_srt"] == TERMS_SRT
+
+
+def test_api_terms_lossless_preserves_bom_crlf():
+    src = (
+        BOM
+        + "1\r\n00:00:01,000 --> 00:00:04,000 X1:10\r\nNASA 上行\r\n\r\n"
+        + "2\r\n00:00:05,000 --> 00:00:06,000\r\n第二句\r\n"
+    )
+    resp = client.post(
+        "/api/terms",
+        json=terms_body(srt=src, rules=[{"standard": "美国宇航局", "aliases": ["NASA"]}]),
+    )
+    assert resp.status_code == 200, resp.text
+    out = resp.json()["unified_srt"]
+    assert out == (
+        BOM
+        + "1\r\n00:00:01,000 --> 00:00:04,000 X1:10\r\n美国宇航局 上行\r\n\r\n"
+        + "2\r\n00:00:05,000 --> 00:00:06,000\r\n第二句\r\n"
+    )
+
+
+def test_api_terms_rejects_empty_alias():
+    resp = client.post(
+        "/api/terms",
+        json=terms_body(rules=[{"standard": "美国宇航局", "aliases": ["NASA", "  "]}]),
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["type"] == "terms"
+    assert "空别名" in resp.json()["detail"]["message"]
+
+    resp = client.post(
+        "/api/terms",
+        json=terms_body(rules=[{"standard": "美国宇航局", "aliases": []}]),
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["type"] == "terms"
+
+
+def test_api_terms_rejects_empty_standard_and_rules():
+    resp = client.post(
+        "/api/terms",
+        json=terms_body(rules=[{"standard": "  ", "aliases": ["NASA"]}]),
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["type"] == "terms"
+    assert "标准写法不能为空" in resp.json()["detail"]["message"]
+
+    resp = client.post("/api/terms", json=terms_body(rules=[]))
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["type"] == "terms"
+
+
+def test_api_terms_rejects_conflicting_alias():
+    resp = client.post(
+        "/api/terms",
+        json=terms_body(
+            rules=[
+                {"standard": "甲", "aliases": ["NASA"]},
+                {"standard": "乙", "aliases": ["nasa", "NASA"]},
+            ]
+        ),
+    )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["type"] == "terms"
+    assert "甲" in detail["message"] and "乙" in detail["message"]
+
+
+def test_api_terms_rejects_bad_srt():
+    resp = client.post("/api/terms", json=terms_body(srt="garbage without timing"))
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["type"] == "srt"

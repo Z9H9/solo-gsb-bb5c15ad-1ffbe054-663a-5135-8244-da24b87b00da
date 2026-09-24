@@ -37,9 +37,20 @@ class TimingRef:
 
 
 @dataclass(frozen=True)
+class TextEdit:
+    """字幕正文某物理行内的一段区间替换（坐标基于剥离行尾后的行内容）。"""
+
+    line_no: int
+    start: int
+    end: int
+    replacement: str
+
+
+@dataclass(frozen=True)
 class ParsedDocument:
     cues: list[Cue]
     timing_refs: list[TimingRef]
+    body_line_nos: list[tuple[int, ...]]
     bom_count: int
 
     @property
@@ -67,12 +78,12 @@ def split_physical_lines(text: str) -> list[str]:
     return lines
 
 
-def _strip_eol(line: str) -> str:
+def strip_eol(line: str) -> str:
     return _EOL_RE.sub("", line)
 
 
-def _parse_document(content: str) -> ParsedDocument:
-    """逐物理行扫描 SRT，同时记录每条时间轴行的位置供无损重写。"""
+def parse_document(content: str) -> ParsedDocument:
+    """逐物理行扫描 SRT，同时记录时间轴行与正文行的位置供无损重写。"""
     if content is None or not content.strip():
         raise SrtParseError("内容为空。")
 
@@ -86,20 +97,22 @@ def _parse_document(content: str) -> ParsedDocument:
     total = len(lines)
     cues: list[Cue] = []
     timing_refs: list[TimingRef] = []
+    body_line_nos: list[tuple[int, ...]] = []
     auto_index = 0
     block_no = 0
 
     i = 0
     while i < total:
         # 跳过块间空行（空串或仅含空白的行）
-        if not _strip_eol(lines[i]).strip():
+        if not strip_eol(lines[i]).strip():
             i += 1
             continue
 
         block_no += 1
+        block_start = i
         block: list[str] = []
-        while i < total and _strip_eol(lines[i]).strip():
-            block.append(_strip_eol(lines[i]))
+        while i < total and strip_eol(lines[i]).strip():
+            block.append(strip_eol(lines[i]))
             i += 1
 
         # 兼容省略序号行的 SRT：首行是纯数字且下一行是时间轴才视作序号
@@ -148,15 +161,24 @@ def _parse_document(content: str) -> ParsedDocument:
                 end_span=timing.span(2),
             )
         )
+        # 正文各物理行的行号（时间轴行之后、块结束之前的连续非空行）
+        body_line_nos.append(
+            tuple(block_start + cursor + 1 + k for k in range(body_line_count))
+        )
 
     if not cues:
         raise SrtParseError("未解析到任何字幕，请粘贴有效的 SRT 内容。")
-    return ParsedDocument(cues=cues, timing_refs=timing_refs, bom_count=bom_count)
+    return ParsedDocument(
+        cues=cues,
+        timing_refs=timing_refs,
+        body_line_nos=body_line_nos,
+        bom_count=bom_count,
+    )
 
 
 def parse_srt(content: str) -> list[Cue]:
     """把 SRT 文本解析为 Cue 列表；块结构为“序号 / 时间轴 / 一行或多行文本”。"""
-    return _parse_document(content).cues
+    return parse_document(content).cues
 
 
 def rewrite_srt(content: str, ranges: list[tuple[int, int]]) -> str:
@@ -165,7 +187,7 @@ def rewrite_srt(content: str, ranges: list[tuple[int, int]]) -> str:
     ``ranges`` 顺序与 :func:`parse_srt` 解析出的字幕一一对应，元素为
     ``(新开始毫秒, 新结束毫秒)``。
     """
-    doc = _parse_document(content)
+    doc = parse_document(content)
     if len(ranges) != len(doc.cues):
         raise ValueError("时间轴替换数量与解析出的字幕条数不一致。")
 
@@ -181,6 +203,43 @@ def rewrite_srt(content: str, ranges: list[tuple[int, int]]) -> str:
             + format_timecode(new_end)
             + line[end_b:]
         )
+
+    rewritten = "".join(lines)
+    # 原文件开头无论出现几个 BOM，输出最多保留一个
+    return (BOM if doc.has_bom else "") + rewritten
+
+
+def rewrite_body_srt(content: str, edits: list[TextEdit]) -> str:
+    """无损重写：仅替换字幕正文物理行内的指定区间，其余字节级内容保持原样。
+
+    ``edits`` 的坐标基于 :func:`strip_eol` 剥离行尾后的行内容（见
+    :class:`TextEdit`），且只能落在字幕正文行上；序号、时间轴、定位参数、
+    空行、原有换行（CRLF/LF/CR）以及开头 BOM 一律保持原样。
+    """
+    doc = parse_document(content)
+    lines = split_physical_lines(content[doc.bom_count :])
+    body_lines = {line_no for cue_lines in doc.body_line_nos for line_no in cue_lines}
+
+    by_line: dict[int, list[TextEdit]] = {}
+    for edit in edits:
+        if edit.line_no not in body_lines:
+            raise ValueError(f"第 {edit.line_no + 1} 个物理行不是字幕正文行，不能改写。")
+        by_line.setdefault(edit.line_no, []).append(edit)
+
+    for line_no, line_edits in by_line.items():
+        line_edits.sort(key=lambda e: (e.start, e.end))
+        text = strip_eol(lines[line_no])
+        eol = lines[line_no][len(text):]
+        parts: list[str] = []
+        cursor = 0
+        for edit in line_edits:
+            if edit.start < cursor or edit.end < edit.start or edit.end > len(text):
+                raise ValueError("正文替换区间越界或相互重叠。")
+            parts.append(text[cursor:edit.start])
+            parts.append(edit.replacement)
+            cursor = edit.end
+        parts.append(text[cursor:])
+        lines[line_no] = "".join(parts) + eol
 
     rewritten = "".join(lines)
     # 原文件开头无论出现几个 BOM，输出最多保留一个

@@ -1,6 +1,6 @@
-# 字幕校正、位置规划与阅读负荷工具
+# 字幕校正、位置规划、阅读负荷与专名统一工具
 
-基于 **Python + FastAPI** 的轻量 Web 工具，包含三个功能页面：
+基于 **Python + FastAPI** 的轻量 Web 工具，包含四个功能页面：
 
 1. **字幕时间漂移校正**：粘贴 SRT 字幕，填入多组人工确认的「原时间 / 正确时间」
    锚点，按分段线性映射校正字幕时间，在网页预览并下载校正后的 SRT。
@@ -10,6 +10,9 @@
 3. **阅读负荷热区**（<http://localhost:8000/reading-load>）：粘贴 SRT，输入阅读
    速率阈值（字/秒）与热区最短持续时长（毫秒），按起止事件精确扫描时间轴，找出
    重叠字幕合计速率严格超标的热区，页面高亮并下载同一份结果 JSON。
+4. **字幕专名统一**（<http://localhost:8000/terms>）：粘贴 SRT，逐行填写「标准
+   写法 + 别名」，按规则把字幕正文中的别名统一替换为标准写法，页面列出替换清单
+   并下载修订后的 SRT。
 
 ## 功能与校正规则（时间漂移）
 
@@ -71,6 +74,30 @@
   不是非负整数、SRT 无法解析时，接口均返回 `422`（`detail.field` 指出字段，
   `detail.message` 给出中文原因；SRT 解析错误的 `detail.type` 为 `srt`）。
 
+## 功能与统一规则（字幕专名）
+
+- 输入 SRT（复用同一套字幕解析器）与至少 **1 条**专名规则；每条规则为一个
+  **标准写法**（替换目标）加 **1 个或多个别名**（页面上用 `|` 分隔多个别名，
+  前后空格自动忽略）。
+- **规则校验**：标准写法不能为空、别名不能为空（含只填空白、多出分隔符产生的
+  空项）；**同一别名不得指向不同的标准写法**（重复指向同一标准写法时以先输入的
+  规则为准）。违反时接口返回 `422`（`detail.type` 为 `terms`，`detail.message`
+  指出第几条规则及原因）。
+- **匹配范围**：只扫描字幕**正文的各个物理行**（逐行独立匹配，不跨行），序号行、
+  时间轴行及其行尾定位参数一律不参与；匹配**区分大小写**。
+- **匹配顺序**：每行从左到右一次扫描，同一位置优先匹配**最长**的别名，等长时按
+  **规则输入顺序**（同一条规则内按别名输入顺序）取先出现者；命中后从该片段之后
+  继续扫描，**替换文本不再参与匹配**（标准写法里即使包含别名也不会连锁替换）。
+- **替换清单**：逐处命中返回字幕的**输入顺序号**（按粘贴 SRT 中字幕出现位置从 1
+  开始，与 SRT 序号无关）、SRT 序号、**原文**（命中的别名）、**标准写法**与
+  **行内位置**（1 起始的物理行号 `line` + 0 起始的字符偏移 `offset`），并附所在行
+  内容 `line_text` 便于核对；页面表格按此列出并在行内高亮命中片段。
+- **无损导出**：修订 SRT 只替换正文行内的命中片段，序号、时间轴、
+  `X1:`/`Position:` 等排版参数、空行、原有换行（CRLF/LF 原样保留）与开头 BOM
+  均保持不变；**未命中任何别名时原文原样返回**。页面预览与下载使用接口返回的
+  同一份 `unified_srt`，下载文件为 `unified.srt`（UTF-8）。
+- SRT 无法解析时接口返回 `422`（`detail.type` 为 `srt`）。
+
 ## 一条命令启动（Docker Compose）
 
 ```bash
@@ -83,6 +110,8 @@ docker compose up -d --build
 - 字幕位置规划界面：<http://localhost:8000/placement>
 - 阅读负荷热区界面：<http://localhost:8000/reading-load>
 - 阅读负荷热区接口：`POST` <http://localhost:8000/api/reading-load>
+- 字幕专名统一界面：<http://localhost:8000/terms>
+- 字幕专名统一接口：`POST` <http://localhost:8000/api/terms>
 - 健康检查：<http://localhost:8000/health>
 - 接口文档（FastAPI 自带）：<http://localhost:8000/docs>
 
@@ -102,7 +131,7 @@ docker compose up -d --build
 ```bash
 HOST_PORT=9000 docker compose up -d --build
 # 访问 http://localhost:9000/ 、http://localhost:9000/placement
-# 与 http://localhost:9000/reading-load
+# 、http://localhost:9000/reading-load 与 http://localhost:9000/terms
 ```
 
 ## 不用 Docker，直接运行（Python 3.10+）
@@ -112,8 +141,8 @@ pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-同样访问 <http://localhost:8000/>、<http://localhost:8000/placement>
-与 <http://localhost:8000/reading-load>。
+同样访问 <http://localhost:8000/>、<http://localhost:8000/placement>、
+<http://localhost:8000/reading-load> 与 <http://localhost:8000/terms>。
 
 ## HTTP 接口
 
@@ -186,21 +215,49 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 合计速率**严格超过**阈值的相接分段先合并，再按 `duration_ms >= min_duration_ms`
 过滤；没有热区时 `zones` 为空数组。参数不合法或 SRT 解析失败返回 `422`。
 
+### `POST /api/terms`
+
+```json
+{
+  "srt": "1\n00:00:01,000 --> 00:00:04,000\nNASA announced it\nand nasa too\n",
+  "rules": [
+    {"standard": "NASA（美国国家航空航天局）", "aliases": ["NASA", "nasa"]},
+    {"standard": "中国国家航天局", "aliases": ["CNSA", "中国国家航天局"]}
+  ]
+}
+```
+
+`rules` 至少 1 条；每条规则的 `standard` 为替换目标，`aliases` 为参与匹配的
+别名列表（至少 1 个，接口侧逐项去首尾空白）。成功返回：
+
+- `unified_srt`：与输入同构的完整 SRT 文本，只替换正文命中片段（序号、时间轴、
+  定位参数、空行、CRLF/LF 换行及 BOM 原样保留；无命中时与输入逐字符一致）；
+- `hit_count` / `hits`：逐处命中，含 `cue_order`（字幕输入顺序号）、`cue_index`
+  （SRT 序号）、`line`（1 起始物理行号）、`offset`（0 起始行内字符偏移）、
+  `matched`（原文，即命中的别名）、`standard`（标准写法）与 `line_text`
+  （所在正文行内容）。
+
+标准写法为空、别名为空、规则为空或同一别名指向不同标准写法时返回 `422`
+（`detail.type` 为 `terms`，`detail.message` 给出中文原因）；SRT 解析失败时
+`detail.type` 为 `srt`。
+
 ## 目录结构
 
 ```
 .
 ├── app/
-│   ├── main.py           # FastAPI 应用、/api/correct、/api/placement 与 /api/reading-load 接口
+│   ├── main.py           # FastAPI 应用与各 /api/* 接口
 │   ├── mapping.py        # 锚点校验与分段线性映射
 │   ├── placement.py      # 遮挡时段并集、遮挡时长统计、位置规划 DP、WebVTT 导出
 │   ├── reading_load.py   # 字 / 秒速率、半开时间轴事件扫描、热区合并与最短时长过滤
-│   ├── srt.py            # SRT 解析与无损重写（仅替换时间码，保留原格式）
+│   ├── terms.py          # 专名规则校验、正文逐行最长优先扫描与替换清单
+│   ├── srt.py            # SRT 解析与无损重写（时间码 / 正文区间替换，保留原格式）
 │   ├── timecode.py       # 时间码解析与格式化（SRT / WebVTT）
 │   └── static/
 │       ├── index.html         # 时间漂移校正页面（原生 HTML/CSS/JS）
 │       ├── placement.html     # 字幕位置规划页面（原生 HTML/CSS/JS）
-│       └── reading_load.html  # 阅读负荷热区页面（原生 HTML/CSS/JS）
+│       ├── reading_load.html  # 阅读负荷热区页面（原生 HTML/CSS/JS）
+│       └── terms.html         # 字幕专名统一页面（原生 HTML/CSS/JS）
 ├── tests/               # 核心算法与接口测试
 ├── Dockerfile
 ├── docker-compose.yml

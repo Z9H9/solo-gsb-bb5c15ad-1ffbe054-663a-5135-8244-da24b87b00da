@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>字幕专名统一</title>
+<style>
+  :root {
+    --bg: #f4f6fa;
+    --card: #ffffff;
+    --border: #d9dee8;
+    --text: #1f2733;
+    --muted: #6b7686;
+    --primary: #2563eb;
+    --primary-hover: #1d4ed8;
+    --danger: #dc2626;
+    --danger-bg: #fef2f2;
+    --warn-bg: #fffbeb;
+    --warn-border: #f59e0b;
+    --ok-bg: #f0fdf4;
+    --ok-border: #16a34a;
+    --hit-bg: #fff7ed;
+    --hit-strong: #ea580c;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 28px 20px 64px; }
+  h1 { font-size: 24px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .nav { margin: 0 0 16px; font-size: 14px; }
+  .nav a { color: var(--primary); text-decoration: none; margin-right: 16px; }
+  .nav a:hover { text-decoration: underline; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  h2 { font-size: 16px; margin: 0 0 12px; }
+  label { display: block; font-weight: 600; margin-bottom: 6px; }
+  .hint { color: var(--muted); font-weight: 400; font-size: 13px; }
+  textarea {
+    width: 100%;
+    min-height: 220px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font: 13px/1.6 var(--mono);
+    resize: vertical;
+  }
+  textarea:focus, input:focus { outline: 2px solid rgba(37, 99, 235, .35); border-color: var(--primary); }
+  table.rules { width: 100%; border-collapse: separate; border-spacing: 0 8px; }
+  table.rules th {
+    text-align: left;
+    font-size: 13px;
+    color: var(--muted);
+    font-weight: 600;
+    padding: 0 8px 0 0;
+  }
+  table.rules td { padding: 0; vertical-align: middle; }
+  table.rules td.std { width: 30%; padding-right: 8px; }
+  table.rules td.op { width: 40px; text-align: center; color: var(--muted); }
+  table.rules td.del { width: 44px; text-align: right; }
+  input[type="text"] {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font: 14px var(--mono);
+  }
+  button {
+    border: 1px solid var(--border);
+    background: #fff;
+    color: var(--text);
+    border-radius: 8px;
+    padding: 8px 16px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  button:hover { background: #f1f4f9; }
+  button.primary {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: #fff;
+    font-weight: 600;
+    padding: 10px 22px;
+  }
+  button.primary:hover { background: var(--primary-hover); }
+  button.danger-link { border-color: transparent; color: var(--danger); padding: 4px 8px; }
+  button.danger-link:hover { background: var(--danger-bg); }
+  .toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+  .alert {
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 16px;
+    font-size: 14px;
+    white-space: pre-wrap;
+  }
+  .alert.error { background: var(--danger-bg); border: 1px solid var(--danger); color: var(--danger); }
+  .alert.warn { background: var(--warn-bg); border: 1px solid var(--warn-border); color: #92400e; }
+  .alert.ok { background: var(--ok-bg); border: 1px solid var(--ok-border); color: #166534; }
+  .hidden { display: none; }
+  .preview {
+    width: 100%;
+    min-height: 220px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font: 13px/1.6 var(--mono);
+    background: #fafbfc;
+    white-space: pre-wrap;
+    overflow-x: auto;
+  }
+  table.hits { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
+  table.hits th, table.hits td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; vertical-align: top; }
+  table.hits th { background: #f8fafc; }
+  table.hits td.num { color: var(--muted); text-align: right; white-space: nowrap; }
+  table.hits td.term { font-family: var(--mono); white-space: nowrap; }
+  table.hits .arrow { color: var(--primary); font-weight: 700; }
+  mark { background: var(--hit-bg); color: var(--hit-strong); font-weight: 700; padding: 0 1px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="nav">
+    <a href="/">时间漂移校正</a>
+    <a href="/placement">字幕位置规划</a>
+    <a href="/reading-load">阅读负荷热区</a>
+  </p>
+  <h1>字幕专名统一</h1>
+  <p class="sub">粘贴 SRT，逐行填写「标准写法」及其别名（多个别名用 | 分隔）。系统只扫描字幕正文的
+    各个物理行，<strong>区分大小写</strong>，从左到右一次匹配：同一位置优先最长别名，等长按规则输入顺序；
+    命中的替换文本不再参与匹配。序号、时间轴、排版参数、空行、BOM 与换行风格全部保持原样。</p>
+
+  <div class="card">
+    <label for="srt">原始 SRT 字幕</label>
+    <textarea id="srt" placeholder="1&#10;00:00:01,000 --> 00:00:04,000&#10;第一句字幕&#10;&#10;2&#10;00:00:05,000 --> 00:00:08,000&#10;第二句字幕"></textarea>
+  </div>
+
+  <div class="card">
+    <h2>专名规则
+      <span class="hint">每行一个标准写法；别名可填多个，用 | 分隔（前后空格自动忽略）。
+        标准写法与别名都不能为空，同一别名不能指向不同的标准写法</span>
+    </h2>
+    <table class="rules">
+      <thead>
+        <tr>
+          <th style="width:30%">标准写法（替换目标）</th>
+          <th>别名（用 | 分隔多个）</th>
+          <th style="width:40px"></th>
+          <th style="width:44px"></th>
+        </tr>
+      </thead>
+      <tbody id="ruleRows"></tbody>
+    </table>
+    <div class="toolbar">
+      <button type="button" id="addRule">+ 添加规则</button>
+      <button type="button" id="fillExample">填入示例</button>
+    </div>
+  </div>
+
+  <div id="errorBox" class="alert error hidden"></div>
+  <div id="warnBox" class="alert warn hidden"></div>
+
+  <div class="toolbar" style="margin-bottom: 20px;">
+    <button type="button" class="primary" id="submit">统一专名</button>
+    <span class="hint" id="status"></span>
+  </div>
+
+  <div id="resultCard" class="card hidden">
+    <h2>替换清单</h2>
+    <div id="okBox" class="alert ok hidden"></div>
+    <div class="toolbar" style="margin-top:0;">
+      <button type="button" class="primary" id="download">下载 unified.srt</button>
+      <span class="hint">修订文件只改正文命中片段，序号、时间轴、排版参数、空行、BOM 与换行风格与原文件一致。</span>
+    </div>
+    <table class="hits">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>字幕输入序号</th>
+          <th>正文行</th>
+          <th>行内位置</th>
+          <th>原文（命中别名）</th>
+          <th></th>
+          <th>标准写法</th>
+          <th>所在行内容</th>
+        </tr>
+      </thead>
+      <tbody id="hitRows"></tbody>
+    </table>
+    <h2 style="margin-top:18px;">修订后 SRT 预览</h2>
+    <pre class="preview" id="preview"></pre>
+  </div>
+</div>
+
+<script>
+(function () {
+  const rowsEl = document.getElementById("ruleRows");
+  const srtEl = document.getElementById("srt");
+  const errorBox = document.getElementById("errorBox");
+  const warnBox = document.getElementById("warnBox");
+  const resultCard = document.getElementById("resultCard");
+  const previewEl = document.getElementById("preview");
+  const hitRowsEl = document.getElementById("hitRows");
+  const okBox = document.getElementById("okBox");
+  const statusEl = document.getElementById("status");
+
+  function addRow(standard, aliases) {
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      '<td class="std"><input type="text" class="std" placeholder="美国国家航空航天局" spellcheck="false"></td>' +
+      '<td><input type="text" class="als" placeholder="NASA|美国宇航局" spellcheck="false"></td>' +
+      '<td class="op">←</td>' +
+      '<td class="del"><button type="button" class="danger-link" title="删除该规则">删除</button></td>';
+    tr.querySelector("input.std").value = standard || "";
+    tr.querySelector("input.als").value = aliases || "";
+    tr.querySelector(".danger-link").addEventListener("click", () => {
+      if (rowsEl.children.length > 1) tr.remove();
+      else alert("至少需要保留 1 条规则。");
+    });
+    rowsEl.appendChild(tr);
+  }
+
+  // 别名按 | 或全角 ｜ 分隔，逐项去掉首尾空白
+  function splitAliases(raw) {
+    return raw.split(/[|｜]/).map(s => s.trim());
+  }
+
+  function collectRules() {
+    const rules = [];
+    for (const tr of rowsEl.querySelectorAll("tr")) {
+      rules.push({
+        standard: tr.querySelector("input.std").value.trim(),
+        aliases: splitAliases(tr.querySelector("input.als").value)
+      });
+    }
+    return rules;
+  }
+
+  function showError(message) {
+    errorBox.textContent = message;
+    errorBox.classList.remove("hidden");
+  }
+  function clearAlerts() {
+    errorBox.classList.add("hidden");
+    warnBox.classList.add("hidden");
+    okBox.classList.add("hidden");
+    errorBox.textContent = "";
+    warnBox.textContent = "";
+    okBox.textContent = "";
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+  }
+
+  // 按接口返回的行内偏移精确高亮命中片段（同一行出现多次也不会标错）
+  function highlightLine(text, offset, len) {
+    return escapeHtml(text.slice(0, offset)) +
+      "<mark>" + escapeHtml(text.slice(offset, offset + len)) + "</mark>" +
+      escapeHtml(text.slice(offset + len));
+  }
+
+  // 初始一条空规则
+  addRow();
+
+  document.getElementById("addRule").addEventListener("click", () => addRow());
+
+  const EXAMPLE_SRT =
+    "1\n00:00:01,000 --> 00:00:04,000\nNASA announced a new mission\nand nasa confirmed it\n\n" +
+    "2\n00:00:05,000 --> 00:00:08,000\nCNSA 与 中国国家航天局 同日发布通告\n\n" +
+    "3\n00:00:09,000 --> 00:00:12,000\n人工智能正在改变世界\n";
+
+  document.getElementById("fillExample").addEventListener("click", () => {
+    srtEl.value = EXAMPLE_SRT;
+    rowsEl.innerHTML = "";
+    addRow("NASA（美国国家航空航天局）", "NASA|nasa");
+    addRow("中国国家航天局", "CNSA|中国国家航天局");
+    addRow("人工智能", "人工|人工智能");
+    clearAlerts();
+    resultCard.classList.add("hidden");
+  });
+
+  document.getElementById("submit").addEventListener("click", async () => {
+    clearAlerts();
+    resultCard.classList.add("hidden");
+
+    const rules = collectRules();
+    // 与后端一致的前置校验：空标准写法 / 空别名先在页面提示
+    for (let i = 0; i < rules.length; i++) {
+      const label = "第 " + (i + 1) + " 条规则";
+      if (!rules[i].standard) {
+        showError(label + "的标准写法不能为空。");
+        return;
+      }
+      if (!rules[i].aliases.length || rules[i].aliases.some(a => !a)) {
+        showError(label + "（" + rules[i].standard + "）存在空别名：请填写别名，或删除多余的 | 分隔符。");
+        return;
+      }
+    }
+
+    statusEl.textContent = "统一专名中…";
+    try {
+      const resp = await fetch("/api/terms", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ srt: srtEl.value, rules })
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        showError((data.detail && data.detail.message) || ("请求失败（HTTP " + resp.status + "）"));
+        statusEl.textContent = "";
+        return;
+      }
+
+      // 页面预览与下载共用同一份服务器返回的 unified_srt
+      window.__unifiedSrt = data.unified_srt;
+      previewEl.textContent = window.__unifiedSrt;
+      hitRowsEl.innerHTML = data.hits.map((h, i) =>
+        "<tr>" +
+        '<td class="num">' + (i + 1) + "</td>" +
+        '<td class="num">' + h.cue_order + "</td>" +
+        '<td class="num">' + h.line + "</td>" +
+        '<td class="num">' + h.offset + "</td>" +
+        '<td class="term">' + escapeHtml(h.matched) + "</td>" +
+        '<td class="arrow">→</td>' +
+        '<td class="term">' + escapeHtml(h.standard) + "</td>" +
+        "<td>" + highlightLine(h.line_text, h.offset, h.matched.length) + "</td>" +
+        "</tr>"
+      ).join("");
+
+      if (data.hit_count === 0) {
+        warnBox.textContent = "没有命中任何别名，修订文件与原文完全一致。";
+        warnBox.classList.remove("hidden");
+      } else {
+        okBox.textContent = "共命中 " + data.hit_count + " 处，已按标准写法替换。";
+        okBox.classList.remove("hidden");
+      }
+      resultCard.classList.remove("hidden");
+      statusEl.textContent = "";
+    } catch (err) {
+      showError("请求出错：" + err);
+      statusEl.textContent = "";
+    }
+  });
+
+  document.getElementById("download").addEventListener("click", () => {
+    // 预览与下载使用同一份服务器返回：服务端仅替换正文命中片段，
+    // 原文件带 BOM 时保留唯一一个 BOM，这里不再额外添加，避免重复。
+    const content = window.__unifiedSrt || "";
+    const blob = new Blob([content], { type: "application/x-subrip;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "unified.srt";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  });
+})();
+</script>
+</body>
+</html>
